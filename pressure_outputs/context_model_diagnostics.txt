@@ -1,0 +1,6 @@
+batter_runs: selected HistGradientBoosting; HistGradientBoosting MAE=1.2964, RandomForest MAE=1.3031
+batter_out: selected HistGradientBoosting; HistGradientBoosting Brier=0.0513, RandomForest Brier=0.0515
+bowler_runs: selected HistGradientBoosting; HistGradientBoosting MAE=1.2588, RandomForest MAE=1.2655
+bowler_wicket: selected HistGradientBoosting; HistGradientBoosting Brier=0.0482, RandomForest Brier=0.0484
+bowler_extra: selected HistGradientBoosting; HistGradientBoosting Brier=0.0393, RandomForest Brier=0.0394
+bowler_dot: selected HistGradientBoosting; HistGradientBoosting Brier=0.2186, RandomForest Brier=0.2194

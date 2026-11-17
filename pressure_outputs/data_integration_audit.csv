@@ -1,0 +1,9 @@
+check,value
+scoped_matches,883.0
+ball_by_ball_rows,200999.0
+unique_batters,888.0
+unique_bowlers,647.0
+batter_playing_xi_order_coverage_pct,99.90746222618023
+bowler_playing_xi_coverage_pct,99.9273628227006
+home_team_directory_coverage_pct,100.0
+away_team_directory_coverage_pct,100.0
