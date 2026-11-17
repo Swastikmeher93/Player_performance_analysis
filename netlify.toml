@@ -1,0 +1,10 @@
+# The Next.js dashboard lives in a subdirectory, so Netlify must build from there.
+[build]
+  base = "client/performance_dashboard"
+  # Install dependencies first so the build also works when node_modules is absent.
+  command = "npm ci --include=dev && npm run build"
+  publish = ".next"
+
+# Next.js runtime: turns the build into server functions/routing on Netlify.
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
