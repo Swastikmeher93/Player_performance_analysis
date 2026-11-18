@@ -30,12 +30,17 @@ Openers are players who batted at positions 1–2 in at least half of their inni
 with at least 10 opening innings. At least half of those opening innings must have
 30+ runs, strike rate >=160, and >=50% of runs from boundaries. This opener consistency
 rate is worth 5% of the score, with non-openers receiving a neutral value.
-Batting score blends shrunken pressure runs above expectation (30%), dismissals
+Batting score blends shrunken pressure runs above expectation (25%), dismissals
 avoided versus expectation (15%), pressure-instance consistency (10%), last-five-over
-strike-rate-at-least-160 frequency (10%), first-innings early-collapse recovery runs
+strike-rate-at-least-160 frequency (5%), first-innings early-collapse recovery runs
 above expectation (5%), powerplay-collapse recovery runs (10%), middle-order pressure
-runs (5%), middle-order strike-rate against spin (5%), opener consistency (5%), and
-sample volume (5%). Early collapse means the first half of the first
+runs (5%), middle-order strike-rate against spin (5%), opener consistency (5%),
+sample volume (5%), and successful extreme-endgame chase runs above expectation
+(10%). For the latter, the batter must face deliveries in a winning chase with
+more than 18 runs per over required and at most 12 legal balls remaining; a
+12-ball prior shrinks sparse samples. The main pressure-run and last-five-over
+components are each reduced by five percentage points to keep batting weights
+at 100%. Early collapse means the first half of the first
 innings with at least two wickets lost. Powerplay collapse means overs 1–6 with at
 least two wickets already lost. Middle-order means batting positions 4–6; these balls
 count as batter pressure after two wickets are down or under the shared pressure
@@ -62,11 +67,12 @@ ranking score measures pressure performance beyond that context.
 
 Machine-learning model
 ----------------------
-HistGradientBoostingRegressor and RandomForestRegressor are compared separately
-for batter runs, batter dismissals, bowler-conceded runs, bowler wickets,
-wides/oversteps, and dot balls on legal deliveries. Three-fold GroupKFold holds out whole matches, preventing
-deliveries from the same match leaking across train and validation. For each
-outcome the lower-MAE model (or lower Brier score for binary outcomes) is used.
+HistGradientBoostingRegressor and RandomForestRegressor estimate batter and
+bowler runs; HistGradientBoostingClassifier and RandomForestClassifier estimate
+batter dismissals, bowler wickets, wides/oversteps, and dot balls. Three-fold
+GroupKFold holds out whole matches, preventing deliveries from the same match
+leaking across train and validation. For each outcome the lower-MAE regression
+model or lower-Brier classification model is used.
 Player identity is excluded from features: each player's pressure result is
 compared with expected results for that situation. Rankings use shrunken residual
 rates and pressure consistency, not in-sample fitted outcomes. This is a
@@ -235,6 +241,11 @@ def add_context(balls: pd.DataFrame) -> pd.DataFrame:
     chase = innings_number.eq(2)
     b["runs_required"] = (b["target"] - b["score_before"]).where(chase)
     b["required_rate"] = (6 * b["runs_required"] / b["balls_left"]).replace([np.inf, -np.inf], np.nan)
+    # Extreme chase pressure: >18 runs per over required with at most 12
+    # legal balls remaining.
+    b["endgame_chase_pressure"] = (
+        chase & b["balls_left"].le(12) & b["required_rate"].gt(18)
+    )
     b["last_five_overs"] = pd.to_numeric(b["overid"], errors="coerce").gt(max_overs - 5)
     over_number = pd.to_numeric(b["overid"], errors="coerce")
     early_innings_half = over_number.le(np.ceil(max_overs / 2))
@@ -271,6 +282,7 @@ def add_context(balls: pd.DataFrame) -> pd.DataFrame:
     b["batter_pressure"] = (
         b["pressure"] | b["early_wicket_recovery"]
         | b["powerplay_collapse_recovery"] | b["middle_order_pressure"]
+        | b["endgame_chase_pressure"]
     )
     return b
 
@@ -286,7 +298,10 @@ def fit_context_models_and_rank(b: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     for the situation. GroupKFold by match prevents within-match leakage.
     """
     try:
-        from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
+        from sklearn.ensemble import (
+            HistGradientBoostingClassifier, HistGradientBoostingRegressor,
+            RandomForestClassifier, RandomForestRegressor,
+        )
         from sklearn.model_selection import GroupKFold
         from sklearn.metrics import mean_absolute_error, brier_score_loss
     except ImportError as exc:
@@ -325,6 +340,7 @@ def fit_context_models_and_rank(b: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     features = ["innings", "overid", "over_ball_num", "score_before", "wickets_before",
                 "balls_left", "runs_required", "required_rate", "pressure", "early_wicket_recovery",
                 "powerplay_collapse_recovery", "middle_order_pressure",
+                "endgame_chase_pressure",
                 "partnership_runs_before", "striker_runs_in_partnership_before",
                 "striker_balls_in_partnership_before", "powerplay_set_partnership",
                 "death_settled_batter_pressure",
@@ -349,17 +365,36 @@ def fit_context_models_and_rank(b: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
             pred = np.full(len(positions), np.nan, dtype=float)
             for train_i, test_i in splitter.split(xx, yy, gg):
                 if model_name == "HistGradientBoosting":
-                    model = HistGradientBoostingRegressor(
-                        max_iter=160, learning_rate=0.05, max_leaf_nodes=15,
-                        min_samples_leaf=40, l2_regularization=2.0, random_state=42,
+                    if binary:
+                        model = HistGradientBoostingClassifier(
+                            max_iter=160, learning_rate=0.05, max_leaf_nodes=15,
+                            min_samples_leaf=40, l2_regularization=2.0, random_state=42,
+                        )
+                    else:
+                        model = HistGradientBoostingRegressor(
+                            max_iter=160, learning_rate=0.05, max_leaf_nodes=15,
+                            min_samples_leaf=40, l2_regularization=2.0, random_state=42,
+                        )
+                else:
+                    if binary:
+                        model = RandomForestClassifier(
+                            n_estimators=30, max_depth=12, min_samples_leaf=30,
+                            max_features=0.8, n_jobs=2, random_state=42,
+                        )
+                    else:
+                        model = RandomForestRegressor(
+                            n_estimators=30, max_depth=12, min_samples_leaf=30,
+                            max_features=0.8, n_jobs=2, random_state=42,
+                        )
+                model.fit(xx.iloc[train_i], yy[train_i])
+                if binary:
+                    positive = np.flatnonzero(model.classes_ == 1)
+                    pred[test_i] = (
+                        model.predict_proba(xx.iloc[test_i])[:, positive[0]]
+                        if len(positive) else 0.0
                     )
                 else:
-                    model = RandomForestRegressor(
-                        n_estimators=30, max_depth=12, min_samples_leaf=30,
-                        max_features=0.8, n_jobs=2, random_state=42,
-                    )
-                model.fit(xx.iloc[train_i], yy[train_i])
-                pred[test_i] = model.predict(xx.iloc[test_i])
+                    pred[test_i] = model.predict(xx.iloc[test_i])
             pred = np.clip(pred, 0, 1) if binary else np.maximum(pred, 0)
             model_predictions[model_name] = pred
 
@@ -552,6 +587,24 @@ def fit_context_models_and_rank(b: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
         weighted_middle_order_spin_rae=("weighted_spin_rae", "sum"),
     )
     bat_agg = bat_agg.join(middle_order_spin_agg, how="left")
+    # Isolate batter contributions in extreme endgame chases that the team won.
+    winning_endgame = frame[
+        frame["endgame_chase_pressure"]
+        & frame["batting_team_id"].eq(frame["win_team_id"])
+        & frame["batter_faced"]
+    ].copy()
+    winning_endgame["weighted_endgame_balls"] = winning_endgame["recency_weight"]
+    winning_endgame["weighted_endgame_rae"] = (
+        winning_endgame["runs"] - winning_endgame["batter_runs_expected"]
+    ) * winning_endgame["recency_weight"]
+    winning_endgame_agg = winning_endgame.groupby("striker_id").agg(
+        winning_endgame_balls=("batter_faced", "sum"),
+        weighted_winning_endgame_balls=("weighted_endgame_balls", "sum"),
+        winning_endgame_runs=("runs", "sum"),
+        weighted_winning_endgame_rae=("weighted_endgame_rae", "sum"),
+        winning_endgame_matches=("match_id", "nunique"),
+    )
+    bat_agg = bat_agg.join(winning_endgame_agg, how="left")
     bat_inst = pb.groupby(["striker_id", "match_id"]).agg(
         net=("runs_above_expected", "sum"), recency=("recency_weight", "mean")
     )
@@ -567,7 +620,9 @@ def fit_context_models_and_rank(b: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
               "middle_order_pressure_balls": 0, "weighted_middle_order_balls": 0,
               "weighted_middle_order_rae": 0, "middle_order_spin_runs": 0,
               "middle_order_spin_balls": 0, "weighted_middle_order_spin_balls": 0,
-              "weighted_middle_order_spin_rae": 0})
+              "weighted_middle_order_spin_rae": 0, "winning_endgame_balls": 0,
+              "weighted_winning_endgame_balls": 0, "winning_endgame_runs": 0,
+              "weighted_winning_endgame_rae": 0, "winning_endgame_matches": 0})
     bat_rank = bat_rank.merge(top_order_stats.reset_index(), on="striker_id", how="left")
     bat_rank["top_order_batter"] = bat_rank["top_order_batter"].fillna(False).astype(bool)
     bat_rank["top_order_qualified"] = bat_rank["top_order_qualified"].fillna(False).astype(bool)
@@ -595,6 +650,10 @@ def fit_context_models_and_rank(b: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     bat_rank["middle_order_spin_rae_per100_shrunk"] = (
         100 * bat_rank["weighted_middle_order_spin_rae"]
         / (bat_rank["weighted_middle_order_spin_balls"] + 60)
+    )
+    bat_rank["winning_endgame_rae_per100_shrunk"] = (
+        100 * bat_rank["weighted_winning_endgame_rae"]
+        / (bat_rank["weighted_winning_endgame_balls"] + 12)
     )
     # Measure a batter's strike rate within each innings' final five overs.
     # Require at least six balls faced in that phase to reduce one-ball noise.
@@ -627,17 +686,21 @@ def fit_context_models_and_rank(b: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     opener_component = pct_high(bat_rank["opener_consistency_rate"]).where(
         bat_rank["opener_batter"] & bat_rank["opener_innings"].ge(10), 0.5
     )
+    winning_endgame_component = pct_high(
+        bat_rank["winning_endgame_rae_per100_shrunk"]
+    ).where(bat_rank["winning_endgame_balls"].ge(6), 0.5)
     bat_rank["score"] = (
-        .30 * pct_high(bat_rank["rae_per100_shrunk"])
+        .25 * pct_high(bat_rank["rae_per100_shrunk"])
         + .15 * pct_high(bat_rank["dav_per100_shrunk"])
         + .10 * pct_high(bat_rank["consistency"])
-        + .10 * pct_high(bat_rank["last5_sr_160_rate"])
+        + .05 * pct_high(bat_rank["last5_sr_160_rate"])
         + .05 * pct_high(bat_rank["early_recovery_rae_per100_shrunk"])
         + .10 * pct_high(bat_rank["powerplay_collapse_rae_per100_shrunk"])
         + .05 * middle_order_component
         + .05 * middle_order_spin_component
         + .05 * opener_component
         + .05 * pct_high(bat_rank["weighted_pressure_balls"])
+        + .10 * winning_endgame_component
     )
     bat_rank["reliability"] = np.sqrt(bat_rank["weighted_pressure_balls"] / (bat_rank["weighted_pressure_balls"] + 100))
     bat_rank["score"] *= bat_rank["reliability"]
